@@ -1,0 +1,53 @@
+@use '@angular/material' as mat;
+
+$robot-theme: mat.define-light-theme((
+  color: (primary: mat.define-palette(mat.$amber-palette, 700), accent: mat.define-palette(mat.$teal-palette, 700), warn: mat.define-palette(mat.$red-palette, 700)),
+  typography: mat.define-typography-config($font-family: 'Avenir Next, Trebuchet MS, sans-serif'),
+  density: -2,
+));
+
+@include mat.core();
+@include mat.all-component-themes($robot-theme);
+
+:root {
+  color-scheme: light;
+  font-family: 'Avenir Next', 'Trebuchet MS', sans-serif;
+  color: #243034;
+  background: #f2f4f1;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; letter-spacing: 0 !important; }
+html, body { min-height: 100%; margin: 0; }
+body { min-width: 320px; background: #f2f4f1; }
+button, input, textarea, select { font: inherit; }
+h1, h2, h3, p { overflow-wrap: anywhere; }
+h1, h2, h3 { font-family: 'DIN Alternate', 'Avenir Next', sans-serif; }
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 15px;
+}
+.page-head > div:first-child { display: grid; gap: 3px; }
+.page-head > div:first-child > span { color: #687579; font-size: 10px; text-transform: uppercase; }
+.page-head h1 { margin: 0; font-size: 27px; line-height: 1.05; }
+.head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.head-actions button, .form-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.error-banner { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 14px; padding: 9px 11px; color: #8d302a; background: #f9e9e6; border: 1px solid #dfa59f; border-radius: 3px; font-size: 11px; }
+.empty { margin: 0; padding: 24px; color: #6b777a; font-size: 11px; text-align: center; }
+.mat-mdc-form-field { width: 100%; }
+.mat-mdc-button, .mat-mdc-unelevated-button, .mat-mdc-outlined-button { border-radius: 3px !important; }
+.mat-mdc-progress-bar { margin-bottom: 12px; }
+
+@media (max-width: 700px) {
+  .page-head { align-items: stretch; flex-direction: column; gap: 10px; }
+  .page-head h1 { font-size: 24px; }
+  .head-actions { justify-content: flex-start; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}

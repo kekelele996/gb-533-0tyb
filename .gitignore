@@ -1,0 +1,11 @@
+.env
+node_modules/
+frontend/dist/
+frontend/.angular/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+coverage/
+backend/server

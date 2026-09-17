@@ -1,0 +1,70 @@
+name: robot-cell-safety-envelope-validator
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-robot-cell-safety-envelope-validator}-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-robot_safety}
+      POSTGRES_USER: ${POSTGRES_USER:-robot_safety}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-robot_safety_local_533}
+    ports:
+      - "${DB_PORT:-57533}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-robot_safety} -d ${POSTGRES_DB:-robot_safety}"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-robot-cell-safety-envelope-validator}-backend
+    environment:
+      PORT: "8080"
+      DB_DRIVER: postgres
+      DB_DSN: ${DB_DSN:-host=db user=robot_safety password=robot_safety_local_533 dbname=robot_safety port=5432 sslmode=disable TimeZone=UTC}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-true}
+      JWT_SECRET: ${JWT_SECRET:-local-robot-cell-safety-secret-533-change-production}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-480}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:18533}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-300}
+      ALGORITHM_VERSION: ${ALGORITHM_VERSION:-envelope-2d-height-v1.0}
+    ports:
+      - "${BACKEND_PORT:-19533}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-robot-cell-safety-envelope-validator}-frontend
+    ports:
+      - "${FRONTEND_PORT:-18533}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: ${COMPOSE_PROJECT_NAME:-robot-cell-safety-envelope-validator}-postgres-data
