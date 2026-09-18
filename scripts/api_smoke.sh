@@ -96,8 +96,51 @@ request "validation detail" 200 GET "/validations/$run_id" "$auditor_token"
 request "programmer cannot review" 403 POST "/validations/$run_id/review" "$programmer_token" '{"note":"Program uploader must not review."}'
 request "reviewer records review" 200 POST "/validations/$run_id/review" "$reviewer_token" '{"note":"Independent offline evidence review completed."}'
 require_json '.data.validation_status == "reviewed"' "reviewed state"
-request "reviewer accepts evidence" 200 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Evidence accepted for planning; site authority remains separate."}'
+violation_count="$(jq '[.data.collision_events[] | select(.violation == true)] | length' <<<"$(curl -sS -H "Authorization: Bearer $reviewer_token" "$api_root/validations/$run_id")")"
+request "accept without waivers rejected" 422 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Cannot accept a failed run with uncovered violations.","waivers":[]}'
+require_json '.error.code == "incomplete_waivers"' "incomplete waivers error code"
+request "run still reviewed after rejection" 200 GET "/validations/$run_id" "$auditor_token"
+require_json '.data.validation_status == "reviewed"' "failed accept keeps prior state"
+request "past deadline waiver rejected" 422 POST "/validations/$run_id/waivers" "$reviewer_token" '{"waiver":{"finding_type":"envelope_violation","finding_index":0,"reason":"Backdated deadline must be rejected.","expires_at":"2000-01-01T00:00:00Z"}}'
+require_json '.error.code == "expired_waiver"' "expired waiver error code"
+request "unknown finding index rejected" 422 POST "/validations/$run_id/waivers" "$reviewer_token" '{"waiver":{"finding_type":"envelope_violation","finding_index":99,"reason":"No such violation on this run.","expires_at":"2030-01-01T00:00:00Z"}}'
+require_json '.error.code == "invalid_waiver_finding"' "invalid waiver finding error code"
+request "programmer cannot grant waiver" 403 POST "/validations/$run_id/waivers" "$programmer_token" '{"waiver":{"finding_type":"envelope_violation","finding_index":0,"reason":"Uploader must not waive their own program.","expires_at":"2030-01-01T00:00:00Z"}}'
+for ((i=0; i<violation_count; i++)); do
+  request "reviewer grants standalone waiver $i" 201 POST "/validations/$run_id/waivers" "$reviewer_token" "$(jq -nc --argjson i "$i" '{waiver:{finding_type:"envelope_violation",finding_index:$i,reason:"Gate guard upgrade scheduled before this deadline.","expires_at":"2030-01-01T00:00:00Z"}}')"
+done
+require_json '.data.validation_status == "reviewed" and (.data.finding_waivers | length) == '"$violation_count" "standalone waiver keeps run reviewed and records history"
+request "duplicate active waiver rejected" 409 POST "/validations/$run_id/waivers" "$reviewer_token" '{"waiver":{"finding_type":"envelope_violation","finding_index":0,"reason":"Second effective waiver for same finding.","expires_at":"2031-01-01T00:00:00Z"}}'
+require_json '.error.code == "duplicate_waiver"' "duplicate waiver error code"
+request "reviewer accepts evidence with coverage" 200 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Evidence accepted for planning; site authority remains separate.","waivers":[]}'
 require_json '.data.validation_status == "accepted" and .data.risk_score > 0' "acceptance preserves objective risk"
+request "waiver history readable after refresh" 200 GET "/validations/$run_id" "$auditor_token"
+require_json '(.data.finding_waivers | length) == '"$violation_count"' and .data.finding_waivers[0].granted_by_name == "reviewer"' "waiver history re-read"
+request "waiver locked after acceptance" 409 POST "/validations/$run_id/waivers" "$reviewer_token" '{"waiver":{"finding_type":"envelope_violation","finding_index":0,"reason":"Accepted runs no longer take waivers.","expires_at":"2030-01-01T00:00:00Z"}}'
+
+atomic_cell_payload='{"cell_code":"QA-CELL-WAIVER","name":"QA waiver atomicity cell","layout_geojson":{"type":"FeatureCollection","features":[]},"robot_model":"QA-Robot-W","controller_model":"QA-Control-W","max_reach_mm":2400,"owner_team":"QA Integration"}'
+request "engineer creates atomicity cell" 201 POST "/cells" "$engineer_token" "$atomic_cell_payload"
+atomic_cell_id="$(jq -r '.data.id' <<<"$last_body")"
+request "engineer creates atomicity zone" 201 POST "/zones" "$engineer_token" "$(jq -nc --argjson cell "$atomic_cell_id" '{robot_cell_id:$cell,name:"QA restricted gate",zone_type:"restricted",polygon_geojson:{type:"Polygon",coordinates:[[[800,-400],[1500,-400],[1500,400],[800,400],[800,-400]]]},min_height_mm:0,max_height_mm:2200,speed_limit_mm_s:100,access_rule:"Gate lock must precede motion"}')"
+atomic_zone_id="$(jq -r '.data.id' <<<"$last_body")"
+request "activate atomicity zone" 200 POST "/zones/$atomic_zone_id/activate" "$engineer_token" "$(jq -nc --argjson version 1 '{version:$version}')"
+atomic_program_payload="$(jq -nc --argjson cell "$atomic_cell_id" '{robot_cell_id:$cell,program_code:"QA-MOVE-WAIVER",version:1,trajectory:[{x_mm:0,y_mm:0,z_mm:700,time_ms:0,speed_mm_s:450},{x_mm:1100,y_mm:0,z_mm:800,time_ms:2500,speed_mm_s:450},{x_mm:1600,y_mm:200,z_mm:850,time_ms:4000,speed_mm_s:350}],tool_radius_mm:160,payload_radius_mm:100,interlock_sequence:[{name:"emergency_stop_reset",sequence:1,depends_on:[]},{name:"gate_locked",sequence:2,depends_on:["emergency_stop_reset"]},{name:"light_curtain_clear",sequence:3,depends_on:["gate_locked"]}]}' )"
+request "programmer imports atomicity program" 201 POST "/programs" "$programmer_token" "$atomic_program_payload"
+atomic_program_id="$(jq -r '.data.id' <<<"$last_body")"
+request "parse atomicity program" 200 POST "/programs/$atomic_program_id/transition" "$programmer_token" '{"target_state":"parsed"}'
+request "ready atomicity program" 200 POST "/programs/$atomic_program_id/transition" "$programmer_token" '{"target_state":"ready"}'
+request "activate atomicity program" 200 POST "/programs/$atomic_program_id/transition" "$programmer_token" '{"target_state":"active"}'
+request "simulate atomicity run" 201 POST "/validations" "$engineer_token" "$(jq -nc --argjson program "$atomic_program_id" '{motion_program_id:$program,retry_failed:false}')" "qa-validation-533-atomic"
+retry_run_id="$(jq -r '.data.id' <<<"$last_body")"
+require_json '.data.validation_status == "failed" and .data.attempt == 1' "fresh failed run for atomic accept"
+atomic_waivers="$(jq -c '[.data.collision_events[] | select(.violation == true)] | to_entries | map({finding_type:"envelope_violation",finding_index:.key,reason:"One-shot waiver appended together with acceptance.","expires_at":"2030-06-01T00:00:00Z"})' <<<"$last_body")"
+dup_payload="$(jq -nc '[{finding_type:"envelope_violation",finding_index:0,reason:"Duplicate first entry.","expires_at":"2030-01-01T00:00:00Z"},{finding_type:"envelope_violation",finding_index:0,reason:"Duplicate second entry.","expires_at":"2030-02-01T00:00:00Z"}]')"
+request "duplicate inside accept rejected" 409 POST "/validations/$retry_run_id/accept" "$reviewer_token" "$(jq -nc --argjson waivers "$dup_payload" '{note:"Duplicate waiver batch must fail as a whole.","waivers":$waivers}')"
+require_json '.error.code == "duplicate_waiver"' "in-request duplicate waiver error code"
+request "run stays failed after duplicate reject" 200 GET "/validations/$retry_run_id" "$auditor_token"
+require_json '.data.validation_status == "failed" and (.data.finding_waivers | length) == 0' "rejected atomic accept changed nothing"
+request "atomic append and accept" 200 POST "/validations/$retry_run_id/accept" "$reviewer_token" "$(jq -nc --argjson waivers "$atomic_waivers" '{note:"Waivers and acceptance persisted in one transaction.","waivers":$waivers}')"
+require_json '.data.validation_status == "accepted" and (.data.finding_waivers | length) == '"$violation_count" "atomic accept with waivers"
 
 self_program="$(jq -nc --argjson cell "$cell_id" '{robot_cell_id:$cell,program_code:"QA-SELF-533",version:1,trajectory:[{x_mm:0,y_mm:0,z_mm:700,time_ms:0},{x_mm:1200,y_mm:0,z_mm:700,time_ms:3000}],tool_radius_mm:100,payload_radius_mm:80,interlock_sequence:[{name:"gate_locked",sequence:1,depends_on:[]}]}' )"
 request "admin imports self-review program" 201 POST "/programs" "$admin_token" "$self_program"

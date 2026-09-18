@@ -21,6 +21,7 @@ docker compose ps
 - 包络仿真：将工具与负载半径扩张成扫掠包络，与启用区域的二维多边形和高度区间求交。
 - 联锁校验：检测缺失前置、顺序反转和有向循环，并输出逐条证据。
 - 人工复核：保留输入快照、算法版本、输入哈希、发现详情、评审和接受/作废记录。
+- 违规豁免：评审员针对单条包络违规或联锁发现追加理由和截止时间；接受失败运行前，每条违规必须存在未过期豁免。
 - 审计中心：按操作者、request ID、实体和动作查询所有写操作的前后投影。
 
 ## 角色与本地账号
@@ -42,7 +43,7 @@ docker compose ps
 | `/cells` | `RobotCell`、`SafetyZone` | 建档、编辑、冻结布局、停用 |
 | `/zones` | `SafetyZone`、`RobotCell` | 画布绘制、修订、启用、停用 |
 | `/programs` | `MotionProgram`、`RobotCell`、`SafetyZone` | 导入、解析、就绪、激活、替代 |
-| `/validation` | `ValidationRun`、`MotionProgram`、`SafetyZone` | 仿真、证据回放、评审、接受、作废 |
+| `/validation` | `ValidationRun`、`MotionProgram`、`SafetyZone`、`FindingWaiver` | 仿真、证据回放、违规豁免、评审、接受、作废 |
 | `/audit` | 四实体审计投影 | 操作者、request ID、实体和动作筛选 |
 
 共享组件：
@@ -68,14 +69,24 @@ uploaded -> parsed -> ready -> active -> superseded
 
 ```text
 queued -> simulating -> passed | failed -> reviewed -> accepted
-                              \           \          \
-                               +-----------+-----------> voided
+                              |         \              ^
+                              |          \-- 完整未过期豁免可直接接受 ----/
+                              +--(passed/failed/reviewed/accepted)-> voided
 ```
 
 - 仿真接口要求 `Idempotency-Key`。
 - 相同输入哈希与算法版本默认复用既有结果。
 - `failed` 结果可显式重试，新记录保存 `attempt` 和 `retry_of_id`，不会覆盖旧尝试。
+- `failed` 运行接受前，每条包络违规与联锁发现必须存在未过期豁免；豁免追加与接受在同一事务中一次落盘，任一失败运行保持原状。
 - `accepted` 只表示离线证据被独立记录，不等于机器人可运行。
+
+### FindingWaiver（违规豁免）
+
+- 豁免对象仅限失败运行中的包络违规（`collision_events` 中 `violation=true`，按违规序号）与联锁发现（`interlock_findings` 下标）；信息性接触不需要也不能豁免。
+- 评审员通过 `POST /validations/:id/waivers` 追加单条豁免，运行状态保持 `failed`/`reviewed`；同一发现只允许一个有效（未过期）豁免，到期后可再次追加，历史行全部保留并随运行详情回读。
+- 豁免理由 8–1000 字，截止时间必须晚于当前时间且不超过五年。
+- 豁免人不能是程序上传者（自审隔离，admin 同样受限）；重复（库内已有有效豁免或同一请求内重复）、过期或越权提交分别返回 `duplicate_waiver`、`expired_waiver`、`forbidden`，拒绝时不写入任何数据。
+- `POST /validations/:id/accept` 可携带 `waivers` 数组：新豁免与状态迁移在一个数据库事务内提交；覆盖不全返回 `incomplete_waivers` 并整体回滚。
 
 ## 包络算法、假设与误差边界
 
@@ -187,11 +198,12 @@ queued -> simulating -> passed | failed -> reviewed -> accepted
 | GET | `/programs/:id` | 程序详情和 checksum |
 | POST | `/programs/:id/transition` | 程序状态迁移 |
 | GET/POST | `/validations` | 列表、幂等仿真 |
-| GET | `/validations/:id` | 冻结证据详情 |
-| POST | `/validations/:id/review`、`accept`、`void` | 人工处置 |
+| GET | `/validations/:id` | 冻结证据与豁免历史详情 |
+| POST | `/validations/:id/review`、`accept`、`void` | 人工处置（accept 可随请求追加豁免） |
+| POST | `/validations/:id/waivers` | 针对单条违规追加未过期豁免 |
 | GET | `/audit` | 审计筛选 |
 
-健康端点为 `/healthz` 与 `/readyz`。统一错误码包括 `invalid_geometry`、`invalid_trajectory`、`invalid_program_transition`、`version_conflict`、`state_conflict`、`forbidden` 和 `unauthorized`。
+健康端点为 `/healthz` 与 `/readyz`。统一错误码包括 `invalid_geometry`、`invalid_trajectory`、`invalid_program_transition`、`version_conflict`、`state_conflict`、`incomplete_waivers`、`duplicate_waiver`、`expired_waiver`、`invalid_waiver_finding`、`forbidden` 和 `unauthorized`。
 
 ## 环境变量和端口
 
@@ -259,7 +271,10 @@ curl -fsS http://127.0.0.1:18533/api/healthz
 - **409 invalid_program_transition**：按 uploaded -> parsed -> ready -> active 顺序推进。
 - **仿真返回旧结果**：相同输入哈希和算法版本会复用；仅失败结果允许 `retry_failed=true` 创建新尝试。
 - **接受后仍显示风险**：预期行为。人工处置不会篡改碰撞、联锁或风险证据。
-- **管理员接受返回 403**：如果管理员本人上传了该程序，自审隔离仍然生效。
+- **接受失败运行返回 422 incomplete_waivers**：每条包络违规和联锁发现都需要一条未过期豁免；补齐后再次接受。
+- **豁免提交返回 409 duplicate_waiver**：该发现已存在未过期豁免，或同一请求里重复列出；到期后才能追加新豁免。
+- **豁免提交返回 422 expired_waiver**：截止时间必须晚于当前时间，且不能超过五年。
+- **管理员接受返回 403**：如果管理员本人上传了该程序，自审隔离仍然生效（豁免追加同样受限）。
 
 ## 停止
 

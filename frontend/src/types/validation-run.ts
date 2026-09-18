@@ -23,6 +23,27 @@ export interface InterlockFinding {
   evidence: string;
 }
 
+export type FindingWaiverKind = 'envelope_violation' | 'interlock_finding';
+
+export interface FindingWaiver {
+  id: number;
+  validation_run_id: number;
+  finding_type: FindingWaiverKind;
+  finding_index: number;
+  reason: string;
+  expires_at: string;
+  granted_by: number;
+  granted_by_name: string;
+  granted_at: string;
+}
+
+export interface FindingWaiverDraft {
+  finding_type: FindingWaiverKind;
+  finding_index: number;
+  reason: string;
+  expires_at: string;
+}
+
 export interface ProgramSnapshot {
   id: number;
   robot_cell_id: number;
@@ -61,6 +82,7 @@ export interface ValidationRun {
   reviewed_by?: number;
   reviewed_at?: string;
   review_note: string;
+  finding_waivers: FindingWaiver[];
   reused: boolean;
 }
 

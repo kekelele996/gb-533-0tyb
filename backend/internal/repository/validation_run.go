@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"robot-cell-safety-envelope-validator/backend/internal/model"
 )
@@ -26,10 +27,31 @@ func (repository *ValidationRunRepository) Create(run *model.ValidationRun) erro
 
 func (repository *ValidationRunRepository) Get(id uint) (model.ValidationRun, error) {
 	var run model.ValidationRun
-	if err := repository.db.Preload("MotionProgram").First(&run, id).Error; err != nil {
+	if err := repository.db.Preload("MotionProgram").Preload("FindingWaivers").First(&run, id).Error; err != nil {
 		return run, fmt.Errorf("get validation run: %w", err)
 	}
 	return run, nil
+}
+
+// GetForUpdate loads a run with its waivers while taking a row lock so
+// concurrent waiver/accept requests for the same run serialize.
+func (repository *ValidationRunRepository) GetForUpdate(tx *gorm.DB, id uint) (model.ValidationRun, error) {
+	var run model.ValidationRun
+	query := tx.Preload("MotionProgram").Preload("FindingWaivers")
+	if tx.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.First(&run, id).Error; err != nil {
+		return run, fmt.Errorf("get locked validation run: %w", err)
+	}
+	return run, nil
+}
+
+func (repository *ValidationRunRepository) CreateWaiver(waiver *model.FindingWaiver) error {
+	if err := repository.db.Create(waiver).Error; err != nil {
+		return fmt.Errorf("create finding waiver: %w", err)
+	}
+	return nil
 }
 
 func (repository *ValidationRunRepository) List(page, pageSize int, programID uint, status string) ([]model.ValidationRun, int64, error) {
@@ -45,7 +67,7 @@ func (repository *ValidationRunRepository) List(page, pageSize int, programID ui
 		return nil, 0, fmt.Errorf("count validation runs: %w", err)
 	}
 	var runs []model.ValidationRun
-	if err := query.Preload("MotionProgram").Order("started_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&runs).Error; err != nil {
+	if err := query.Preload("MotionProgram").Preload("FindingWaivers").Order("started_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&runs).Error; err != nil {
 		return nil, 0, fmt.Errorf("list validation runs: %w", err)
 	}
 	return runs, total, nil
@@ -53,7 +75,7 @@ func (repository *ValidationRunRepository) List(page, pageSize int, programID ui
 
 func (repository *ValidationRunRepository) FindByIdempotencyKey(key string) (model.ValidationRun, error) {
 	var run model.ValidationRun
-	if err := repository.db.Preload("MotionProgram").Where("idempotency_key = ?", key).First(&run).Error; err != nil {
+	if err := repository.db.Preload("MotionProgram").Preload("FindingWaivers").Where("idempotency_key = ?", key).First(&run).Error; err != nil {
 		return run, fmt.Errorf("find idempotent run: %w", err)
 	}
 	return run, nil
@@ -61,7 +83,7 @@ func (repository *ValidationRunRepository) FindByIdempotencyKey(key string) (mod
 
 func (repository *ValidationRunRepository) LatestByInput(inputHash, algorithmVersion string) (model.ValidationRun, error) {
 	var run model.ValidationRun
-	if err := repository.db.Preload("MotionProgram").Where("input_hash = ? AND algorithm_version = ?", inputHash, algorithmVersion).
+	if err := repository.db.Preload("MotionProgram").Preload("FindingWaivers").Where("input_hash = ? AND algorithm_version = ?", inputHash, algorithmVersion).
 		Order("attempt DESC, id DESC").First(&run).Error; err != nil {
 		return run, fmt.Errorf("find latest input run: %w", err)
 	}

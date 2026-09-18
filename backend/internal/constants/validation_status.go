@@ -51,7 +51,7 @@ func CanTransitionValidation(from, to string) bool {
 		ValidationQueued:     {ValidationSimulating: true},
 		ValidationSimulating: {ValidationPassed: true, ValidationFailed: true},
 		ValidationPassed:     {ValidationReviewed: true, ValidationVoided: true},
-		ValidationFailed:     {ValidationReviewed: true, ValidationVoided: true},
+		ValidationFailed:     {ValidationReviewed: true, ValidationAccepted: true, ValidationVoided: true},
 		ValidationReviewed:   {ValidationAccepted: true, ValidationVoided: true},
 		ValidationAccepted:   {ValidationVoided: true},
 	}

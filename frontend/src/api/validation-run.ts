@@ -1,6 +1,6 @@
 import { inject, Injectable } from '@angular/core';
 import { ApiClient } from './api-client';
-import { ValidationRun } from '../types/validation-run';
+import { FindingWaiverDraft, ValidationRun } from '../types/validation-run';
 
 @Injectable({ providedIn: 'root' })
 export class ValidationRunApi {
@@ -11,6 +11,11 @@ export class ValidationRunApi {
     return this.api.post<ValidationRun>('/validations', { motion_program_id: motionProgramId, retry_failed: retryFailed }, { 'Idempotency-Key': idempotencyKey });
   }
   review(id: number, note: string) { return this.api.post<ValidationRun>(`/validations/${id}/review`, { note }); }
-  accept(id: number, note: string) { return this.api.post<ValidationRun>(`/validations/${id}/accept`, { note }); }
+  grantWaiver(id: number, waiver: FindingWaiverDraft) {
+    return this.api.post<ValidationRun>(`/validations/${id}/waivers`, { waiver });
+  }
+  accept(id: number, note: string, waivers: FindingWaiverDraft[]) {
+    return this.api.post<ValidationRun>(`/validations/${id}/accept`, { note, waivers });
+  }
   void(id: number, note: string) { return this.api.post<ValidationRun>(`/validations/${id}/void`, { note }); }
 }

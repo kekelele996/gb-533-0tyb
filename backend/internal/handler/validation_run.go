@@ -61,7 +61,40 @@ func (handler *ValidationRunHandler) Review(context *gin.Context) {
 	handler.reviewAction(context, handler.service.Review)
 }
 func (handler *ValidationRunHandler) Accept(context *gin.Context) {
-	handler.reviewAction(context, handler.service.Accept)
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.AcceptValidationRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.Accept(id, request.Note, request.Waivers, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+func (handler *ValidationRunHandler) GrantWaiver(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.GrantWaiverRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.GrantWaiver(id, request.Waiver, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusCreated, item)
 }
 func (handler *ValidationRunHandler) Void(context *gin.Context) {
 	handler.reviewAction(context, handler.service.Void)

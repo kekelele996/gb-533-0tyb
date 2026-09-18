@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, effect, inject, OnInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, OnInit, ViewChild } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -10,14 +10,15 @@ import { LucideAngularModule } from 'lucide-angular';
 import { MotionProgramStore } from '../stores/motion-program.store';
 import { useValidationRun } from '../hooks/use-validation-run';
 import { useAuth } from '../hooks/use-auth';
-import { ValidationRun } from '../types/validation-run';
+import { FindingWaiverDraft, ValidationRun } from '../types/validation-run';
 import { CellStateBadgeComponent } from '../components/common/cell-state-badge.component';
 import { SafetyCanvasComponent } from '../components/common/safety-canvas.component';
 import { FindingDrawerComponent } from '../components/common/finding-drawer.component';
+import { WaiverPanelComponent } from '../components/common/waiver-panel.component';
 
 @Component({
   standalone: true,
-  imports: [DatePipe, DecimalPipe, SlicePipe, FormsModule, MatButtonModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, LucideAngularModule, CellStateBadgeComponent, SafetyCanvasComponent, FindingDrawerComponent],
+  imports: [DatePipe, DecimalPipe, SlicePipe, FormsModule, MatButtonModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, LucideAngularModule, CellStateBadgeComponent, SafetyCanvasComponent, FindingDrawerComponent, WaiverPanelComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="page-head"><div><span>Offline simulation</span><h1>Envelope validation</h1></div><div class="head-actions"><button mat-stroked-button type="button" (click)="reload()"><lucide-icon name="refresh-cw" [size]="16" />Refresh</button>@if (canSimulate()) { <mat-form-field appearance="outline" class="program-select"><mat-label>Ready program</mat-label><mat-select [(ngModel)]="programId">@for (program of eligiblePrograms(); track program.id) { <mat-option [value]="program.id">{{ program.program_code }} · v{{ program.version }}</mat-option> }</mat-select></mat-form-field><button mat-flat-button color="primary" type="button" (click)="run()" [disabled]="!programId || runs.loading()"><lucide-icon name="play" [size]="16" />Run simulation</button> }</div></section>
@@ -40,10 +41,14 @@ import { FindingDrawerComponent } from '../components/common/finding-drawer.comp
           <app-safety-canvas [zones]="run.zone_snapshot" [trajectory]="run.program_snapshot.trajectory ?? []" />
           <p class="explanation"><lucide-icon name="info" [size]="16" />{{ run.explanation }}</p>
           <app-finding-drawer [collisions]="run.collision_events" [interlocks]="run.interlock_findings" />
+          @if (needsWaivers(run)) {
+            <app-waiver-panel #waiverPanel [run]="run" [canReview]="canReview()" (grant)="grantWaiver(run, $event)" />
+          }
           <section class="review-block">
             <div><span>Human review</span>@if (run.review_note) { <p>{{ run.review_note }}</p> } @else { <p>No review note recorded.</p> }</div>
             @if (canReview() && (run.validation_status === 'passed' || run.validation_status === 'failed')) { <mat-form-field appearance="outline"><mat-label>Review note</mat-label><input matInput [(ngModel)]="reviewNote" /></mat-form-field><button mat-flat-button color="primary" type="button" (click)="review(run)" [disabled]="reviewNote.trim().length < 8"><lucide-icon name="user-check" [size]="16" />Record review</button> }
             @if (canReview() && run.validation_status === 'reviewed') { <mat-form-field appearance="outline"><mat-label>Acceptance note</mat-label><input matInput [(ngModel)]="reviewNote" /></mat-form-field><button mat-flat-button color="primary" type="button" (click)="accept(run)" [disabled]="reviewNote.trim().length < 8"><lucide-icon name="circle-check" [size]="16" />Accept evidence</button><button mat-stroked-button type="button" (click)="voidRun(run)" [disabled]="reviewNote.trim().length < 8">Void</button> }
+            @if (canReview() && run.validation_status === 'failed') { <mat-form-field appearance="outline"><mat-label>Acceptance note</mat-label><input matInput [(ngModel)]="reviewNote" /></mat-form-field><button mat-flat-button color="primary" type="button" (click)="accept(run)" [disabled]="reviewNote.trim().length < 8"><lucide-icon name="circle-check" [size]="16" />Accept with waivers</button><button mat-stroked-button type="button" (click)="voidRun(run)" [disabled]="reviewNote.trim().length < 8">Void</button> }
             @if (canSimulate() && run.validation_status === 'failed') { <button mat-stroked-button type="button" (click)="retry(run)"><lucide-icon name="rotate-ccw" [size]="15" />Retry failed input</button> }
           </section>
         } @else { <p class="empty">Select a run to inspect frozen evidence</p> }
@@ -62,6 +67,7 @@ export class ValidationPage implements OnInit {
   readonly eligiblePrograms = computed(() => this.programs.items().filter((program) => program.program_state === 'ready' || program.program_state === 'active'));
   programId: number | null = null;
   reviewNote = 'Independent offline evidence review completed.';
+  @ViewChild('waiverPanel') waiverPanel?: WaiverPanelComponent;
   canSimulate = () => this.auth.can('safety_engineer', 'admin');
   canReview = () => this.auth.can('reviewer', 'admin');
   constructor() {
@@ -75,6 +81,14 @@ export class ValidationPage implements OnInit {
   run(): void { if (this.programId) this.runs.create(this.programId); }
   retry(run: ValidationRun): void { this.runs.create(run.motion_program_id, true); }
   review(run: ValidationRun): void { this.runs.review(run, this.reviewNote); }
-  accept(run: ValidationRun): void { this.runs.accept(run, this.reviewNote); }
+  accept(run: ValidationRun): void {
+    const waivers = this.needsWaivers(run) ? this.waiverPanel?.pending() ?? [] : [];
+    this.runs.accept(run, this.reviewNote, waivers);
+  }
+  grantWaiver(run: ValidationRun, waiver: FindingWaiverDraft): void { this.runs.grantWaiver(run, waiver); }
   voidRun(run: ValidationRun): void { this.runs.void(run, this.reviewNote); }
+  needsWaivers(run: ValidationRun): boolean {
+    if (run.validation_status !== 'failed' && run.validation_status !== 'reviewed') return false;
+    return run.collision_events.some((event) => event.violation) || run.interlock_findings.length > 0;
+  }
 }

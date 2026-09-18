@@ -6,7 +6,7 @@ import {
   AlertTriangle, Boxes, ChevronRight, CircleCheck, CircleDot, CircleOff, ClipboardCheck,
   DoorOpen, FileCode2, GitBranch, Grid3X3, Info, LogIn, LogOut, LucideAngularModule,
   Map, PauseCircle, Play, Plus, RefreshCw, RotateCcw, Save, ScanLine, ShieldCheck,
-  Snowflake, TriangleAlert, Upload, UserCheck, X,
+  ShieldHalf, ShieldOff, ShieldPlus, Snowflake, TriangleAlert, Upload, UserCheck, X,
 } from 'lucide-angular';
 import { routes } from '../router/app.routes';
 import { authInterceptor } from '../api/auth.interceptor';
@@ -19,8 +19,8 @@ export const appConfig: ApplicationConfig = {
     importProvidersFrom(LucideAngularModule.pick({
       AlertTriangle, Boxes, ChevronRight, CircleCheck, CircleDot, CircleOff, ClipboardCheck,
       DoorOpen, FileCode2, GitBranch, Grid3X3, Info, LogIn, LogOut, Map, PauseCircle,
-      Play, Plus, RefreshCw, RotateCcw, Save, ScanLine, ShieldCheck, Snowflake,
-      TriangleAlert, Upload, UserCheck, X,
+      Play, Plus, RefreshCw, RotateCcw, Save, ScanLine, ShieldCheck, ShieldHalf, ShieldOff,
+      ShieldPlus, Snowflake, TriangleAlert, Upload, UserCheck, X,
     })),
   ],
 };
