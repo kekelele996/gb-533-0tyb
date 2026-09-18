@@ -1,13 +1,76 @@
-import { ChangeDetectionStrategy, Component, input } from '@angular/core';
-import { DecimalPipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, computed, input, output, signal } from '@angular/core';
+import { DatePipe, DecimalPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { LucideAngularModule } from 'lucide-angular';
-import { CollisionEvent, InterlockFinding } from '../../types/validation-run';
+import { CollisionEvent, InterlockFinding, ViolationWaiver, WaiverFindingKind } from '../../types/validation-run';
+
+export interface WaiverDraft {
+  kind: WaiverFindingKind;
+  index: number;
+  reason: string;
+  deadline: string;
+}
+
+@Component({
+  selector: 'app-waiver-panel',
+  standalone: true,
+  imports: [DatePipe, FormsModule, MatButtonModule, MatFormFieldModule, MatInputModule, LucideAngularModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <section class="waiver-block" [class.has-active]="active() !== null">
+      @if (active(); as waiver) {
+        <div class="waiver-active"><lucide-icon name="shield-check" [size]="15" /><div><strong>Active waiver</strong><span>{{ waiver.reason }}</span><small>{{ waiver.granted_by_name }} · valid until {{ waiver.expires_at | date:'MMM d, yyyy HH:mm' }} UTC</small></div></div>
+      }
+      @for (waiver of history(); track waiver.id) {
+        <div class="waiver-history"><lucide-icon name="history" [size]="13" /><span>{{ waiver.reason }} — {{ waiver.granted_by_name }}, expired {{ waiver.expires_at | date:'MMM d, yyyy' }}</span></div>
+      }
+      @if (canWaive() && active() === null) {
+        <div class="waiver-form">
+          <mat-form-field appearance="outline"><mat-label>Waiver justification</mat-label><textarea matInput rows="2" [ngModel]="reason()" (ngModelChange)="reason.set($event)"></textarea></mat-form-field>
+          <mat-form-field appearance="outline" class="deadline"><mat-label>Valid until (UTC)</mat-label><input matInput type="datetime-local" [ngModel]="deadline()" (ngModelChange)="deadline.set($event)" /></mat-form-field>
+          <div class="waiver-actions">
+            <button mat-stroked-button type="button" [disabled]="!ready()" (click)="emit('save')"><lucide-icon name="file-shield" [size]="15" />Save waiver</button>
+            <button mat-stroked-button type="button" class="stage" [disabled]="!ready()" (click)="emit('stage')"><lucide-icon name="file-pen-line" [size]="15" />Stage for accept</button>
+          </div>
+        </div>
+      }
+    </section>
+  `,
+  styles: [`
+    .waiver-block{margin-top:9px;padding:9px 10px;background:#f6f3e7;border:1px solid #d8cfa8;border-radius:3px}.waiver-block.has-active{background:#eef5ec;border-color:#a9c8ab}.waiver-active{display:flex;gap:8px;align-items:flex-start;color:#2f5d3a}.waiver-active lucide-icon{margin-top:1px}.waiver-active div{display:grid;gap:2px}.waiver-active strong{font-size:10px;text-transform:uppercase}.waiver-active span{font-size:11px;color:#3c4a40}.waiver-active small{font-size:9px;color:#69776c}.waiver-history{display:flex;gap:6px;align-items:flex-start;margin-top:6px;color:#7d7355;font-size:10px}.waiver-history lucide-icon{margin-top:1px;flex:none}.waiver-form{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-top:8px}.waiver-form mat-form-field{width:230px;margin-bottom:-14px}.waiver-actions{display:grid;gap:6px}.waiver-actions button{display:flex;gap:5px;white-space:nowrap}.waiver-actions button.stage{color:#8a6d1f;border-color:#d8cfa8}@media(max-width:600px){.waiver-form mat-form-field{width:100%}.waiver-actions{width:100%}.waiver-actions button{width:100%;justify-content:center}}
+  `],
+})
+export class WaiverPanelComponent {
+  readonly kind = input.required<WaiverFindingKind>();
+  readonly index = input.required<number>();
+  readonly waivers = input<ViolationWaiver[]>([]);
+  readonly canWaive = input(false);
+  readonly saveWaiver = output<WaiverDraft>();
+  readonly stageWaiver = output<WaiverDraft>();
+
+  readonly reason = signal('');
+  readonly deadline = signal('');
+  readonly active = computed(() => this.waivers().find((waiver) => waiver.finding_kind === this.kind() && waiver.finding_index === this.index() && waiver.active) ?? null);
+  readonly history = computed(() => this.waivers().filter((waiver) => waiver.finding_kind === this.kind() && waiver.finding_index === this.index() && !waiver.active));
+  readonly ready = computed(() => this.reason().trim().length >= 8 && !!this.deadline() && new Date(this.deadline()).getTime() > Date.now());
+
+  emit(mode: 'save' | 'stage'): void {
+    if (!this.ready()) return;
+    const draft: WaiverDraft = { kind: this.kind(), index: this.index(), reason: this.reason().trim(), deadline: this.deadline() };
+    (mode === 'save' ? this.saveWaiver : this.stageWaiver).emit(draft);
+    this.reason.set('');
+    this.deadline.set('');
+  }
+}
 
 @Component({
   selector: 'app-finding-drawer',
   standalone: true,
-  imports: [DecimalPipe, MatExpansionModule, LucideAngularModule],
+  imports: [DatePipe, DecimalPipe, MatExpansionModule, LucideAngularModule, WaiverPanelComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <mat-accordion class="finding-drawer" multi>
@@ -22,6 +85,7 @@ import { CollisionEvent, InterlockFinding } from '../../types/validation-run';
             <div><lucide-icon [name]="item.violation ? 'triangle-alert' : 'info'" [size]="15" /><strong>{{ item.zone_name }}</strong><span>{{ item.zone_type }}</span></div>
             <p>{{ item.evidence }}</p>
             <dl><div><dt>Segment</dt><dd>{{ item.segment_index }}</dd></div><div><dt>First contact</dt><dd>{{ item.first_time_ms | number:'1.0-0' }} ms</dd></div><div><dt>Speed</dt><dd>{{ item.actual_speed_mm_s | number:'1.0-0' }} / {{ item.allowed_speed_mm_s | number:'1.0-0' }} mm/s</dd></div></dl>
+            @if (item.violation) { <app-waiver-panel kind="envelope_violation" [index]="$index" [waivers]="waivers()" [canWaive]="canWaive()" (saveWaiver)="saveWaiver.emit($event)" (stageWaiver)="stageWaiver.emit($event)" /> }
           </article>
         }
       </mat-expansion-panel>
@@ -32,7 +96,12 @@ import { CollisionEvent, InterlockFinding } from '../../types/validation-run';
         </mat-expansion-panel-header>
         @if (!interlocks().length) { <p class="empty"><lucide-icon name="circle-check" [size]="16" /> Dependency sequence has no findings</p> }
         @for (item of interlocks(); track $index) {
-          <article class="finding violation"><div><lucide-icon name="triangle-alert" [size]="15" /><strong>{{ item.code }}</strong><span>{{ item.event }}</span></div><p>{{ item.evidence }}</p>@if (item.path?.length) { <code>{{ item.path?.join(' → ') }}</code> }</article>
+          <article class="finding violation">
+            <div><lucide-icon name="triangle-alert" [size]="15" /><strong>{{ item.code }}</strong><span>{{ item.event }}</span></div>
+            <p>{{ item.evidence }}</p>
+            @if (item.path?.length) { <code>{{ item.path?.join(' → ') }}</code> }
+            <app-waiver-panel kind="interlock_finding" [index]="$index" [waivers]="waivers()" [canWaive]="canWaive()" (saveWaiver)="saveWaiver.emit($event)" (stageWaiver)="stageWaiver.emit($event)" />
+          </article>
         }
       </mat-expansion-panel>
     </mat-accordion>
@@ -46,4 +115,8 @@ export class FindingDrawerComponent {
   readonly collisions = input<CollisionEvent[]>([]);
   readonly interlocks = input<InterlockFinding[]>([]);
   readonly interlockTitle = input('Interlock evidence');
+  readonly waivers = input<ViolationWaiver[]>([]);
+  readonly canWaive = input(false);
+  readonly saveWaiver = output<WaiverDraft>();
+  readonly stageWaiver = output<WaiverDraft>();
 }

@@ -58,16 +58,51 @@ func (handler *ValidationRunHandler) Create(context *gin.Context) {
 }
 
 func (handler *ValidationRunHandler) Review(context *gin.Context) {
-	handler.reviewAction(context, handler.service.Review)
-}
-func (handler *ValidationRunHandler) Accept(context *gin.Context) {
-	handler.reviewAction(context, handler.service.Accept)
+	handler.noteAction(context, handler.service.Review)
 }
 func (handler *ValidationRunHandler) Void(context *gin.Context) {
-	handler.reviewAction(context, handler.service.Void)
+	handler.noteAction(context, handler.service.Void)
 }
 
-func (handler *ValidationRunHandler) reviewAction(context *gin.Context, action func(uint, string, dto.Actor, string) (dto.ValidationRunResponse, error)) {
+func (handler *ValidationRunHandler) Accept(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.AcceptValidationRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.Accept(id, request.Note, request.Waivers, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
+func (handler *ValidationRunHandler) GrantWaivers(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.GrantWaiversRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.GrantWaivers(id, request.Waivers, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
+func (handler *ValidationRunHandler) noteAction(context *gin.Context, action func(uint, string, dto.Actor, string) (dto.ValidationRunResponse, error)) {
 	id, err := PathID(context)
 	if err != nil {
 		WriteError(context, err)

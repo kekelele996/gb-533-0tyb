@@ -96,8 +96,58 @@ request "validation detail" 200 GET "/validations/$run_id" "$auditor_token"
 request "programmer cannot review" 403 POST "/validations/$run_id/review" "$programmer_token" '{"note":"Program uploader must not review."}'
 request "reviewer records review" 200 POST "/validations/$run_id/review" "$reviewer_token" '{"note":"Independent offline evidence review completed."}'
 require_json '.data.validation_status == "reviewed"' "reviewed state"
-request "reviewer accepts evidence" 200 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Evidence accepted for planning; site authority remains separate."}'
-require_json '.data.validation_status == "accepted" and .data.risk_score > 0' "acceptance preserves objective risk"
+request "reviewer cannot accept violation run without waivers" 422 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Attempting acceptance without any violation waiver."}'
+require_json '.error.code == "unwaived_violations"' "unwaived violation error"
+
+# Violation waivers: a reviewer grants a time-limited justification per finding.
+request "load run for waiver coordinates" 200 GET "/validations/$run_id" "$reviewer_token"
+violation_index="$(jq -r '([.data.collision_events | to_entries[] | select(.value.violation == true)][0].key) // empty' <<<"$last_body")"
+expires_future="$(date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)"
+expires_past="$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+waiver_batch="$(jq -c --arg expires "$expires_future" '{waivers:[.data.collision_events | to_entries[] | select(.value.violation == true) | {finding_kind:"envelope_violation",finding_index:.key,reason:"Temporary guarded operation accepted during ramp-up",expires_at:$expires}]}' <<<"$last_body")"
+waiver_count="$(jq -r '.waivers | length' <<<"$waiver_batch")"
+request "programmer cannot grant waiver" 403 POST "/validations/$run_id/waivers" "$programmer_token" "$waiver_batch"
+request "reviewer grants violation waivers" 200 POST "/validations/$run_id/waivers" "$reviewer_token" "$waiver_batch"
+require_json "(.data.violation_waivers | length) == $waiver_count and .data.violation_waivers[0].active == true and .data.violation_waivers[0].granted_by_name == \"reviewer\"" "waivers persisted and active"
+request "duplicate active waiver rejected" 409 POST "/validations/$run_id/waivers" "$reviewer_token" "$waiver_batch"
+require_json '.error.code == "duplicate_waiver"' "duplicate waiver error"
+single_expired="$(jq -nc --argjson idx "$violation_index" --arg expires "$expires_past" '{waivers:[{finding_kind:"envelope_violation",finding_index:$idx,reason:"This waiver is already expired",expires_at:$expires}]}')"
+request "expired waiver rejected" 422 POST "/validations/$run_id/waivers" "$reviewer_token" "$single_expired"
+require_json '.error.code == "waiver_already_expired"' "expired waiver error"
+request "reload run for advisory coordinate" 200 GET "/validations/$run_id" "$reviewer_token"
+advisory_index="$(jq -r '([.data.collision_events | to_entries[] | select(.value.violation == false)][0].key) // empty' <<<"$last_body")"
+if [[ -n "$advisory_index" ]]; then
+  request "advisory contact cannot be waived" 422 POST "/validations/$run_id/waivers" "$reviewer_token" "$(jq -nc --argjson idx "$advisory_index" '{waivers:[{finding_kind:"envelope_violation",finding_index:$idx,reason:"Advisory contacts are not violations",expires_at:"2099-01-01T00:00:00Z"}]}')"
+fi
+request "waiver history readable on refresh" 200 GET "/validations/$run_id" "$auditor_token"
+require_json "(.data.violation_waivers | length) == $waiver_count and .data.program_uploaded_by != null" "waivers survive refresh"
+
+request "accept with full unexpired waiver coverage" 200 POST "/validations/$run_id/accept" "$reviewer_token" '{"note":"Evidence accepted with time-limited waiver; site authority remains separate."}'
+require_json ".data.validation_status == \"accepted\" and .data.risk_score > 0 and (.data.violation_waivers | length) == $waiver_count" "acceptance preserves risk and waivers"
+
+# Fresh failed run: atomic accept-with-waivers must roll back when coverage is incomplete.
+wprogram_payload="$(jq -nc --argjson cell "$cell_id" '{robot_cell_id:$cell,program_code:"QA-WAIVER-533",version:1,trajectory:[{x_mm:0,y_mm:0,z_mm:700,time_ms:0,speed_mm_s:450},{x_mm:1100,y_mm:0,z_mm:800,time_ms:2500,speed_mm_s:450},{x_mm:1600,y_mm:200,z_mm:850,time_ms:4000,speed_mm_s:350}],tool_radius_mm:160,payload_radius_mm:100,interlock_sequence:[{name:"emergency_stop_reset",sequence:1,depends_on:[]},{name:"gate_locked",sequence:2,depends_on:["missing_gate"]}]}')"
+request "programmer imports waiver program" 201 POST "/programs" "$programmer_token" "$wprogram_payload"
+wprogram_id="$(jq -r '.data.id' <<<"$last_body")"
+request "parse waiver program" 200 POST "/programs/$wprogram_id/transition" "$programmer_token" '{"target_state":"parsed"}'
+request "ready waiver program" 200 POST "/programs/$wprogram_id/transition" "$programmer_token" '{"target_state":"ready"}'
+request "run waiver simulation" 201 POST "/validations" "$engineer_token" "$(jq -nc --argjson program "$wprogram_id" '{motion_program_id:$program}')" "qa-validation-533-waiver"
+wrun_id="$(jq -r '.data.id' <<<"$last_body")"
+require_json '.data.validation_status == "failed"' "waiver run failed"
+violation_total="$(jq -r '[.data.collision_events[] | select(.violation == true)] | length' <<<"$last_body")"
+interlock_total="$(jq -r '.data.interlock_findings | length' <<<"$last_body")"
+# Cover only the interlock finding; envelope violations remain uncovered, so accept must roll the waiver back too.
+partial_accept="$(jq -nc --arg expires "$expires_future" '{note:"Attempting partial coverage acceptance",waivers:[{finding_kind:"interlock_finding",finding_index:0,reason:"Interlock temporarily accepted",expires_at:$expires}]}')"
+request "partial coverage accept rejected atomically" 422 POST "/validations/$wrun_id/accept" "$reviewer_token" "$partial_accept"
+require_json '.error.code == "unwaived_violations"' "partial coverage error"
+request "failed run unchanged after rejected accept" 200 GET "/validations/$wrun_id" "$auditor_token"
+require_json '.data.validation_status == "failed" and (.data.violation_waivers | length) == 0' "run stays failed with no waivers"
+# One combined call appends all waivers and accepts in a single transaction.
+full_accept="$(jq -nc --arg expires "$expires_future" '{note:"All violations waived and accepted in one transaction",waivers:([range(0,'$interlock_total') | {finding_kind:"interlock_finding",finding_index:.,reason:"Interlock finding waived with compensating procedure",expires_at:$expires}] + [range(0,'$violation_total') | {finding_kind:"envelope_violation",finding_index:.,reason:"Envelope violation waived under temporary guard plan",expires_at:$expires}])}')"
+request "accept atomically with all waivers" 200 POST "/validations/$wrun_id/accept" "$reviewer_token" "$full_accept"
+require_json ".data.validation_status == \"accepted\" and (.data.violation_waivers | length) == ($violation_total + $interlock_total)" "atomic waiver accept"
+request "accepted run waivers still readable" 200 GET "/validations/$wrun_id" "$auditor_token"
+require_json "([.data.violation_waivers[] | select(.active == true)] | length) == ($violation_total + $interlock_total)" "historical waivers readable after refresh"
 
 self_program="$(jq -nc --argjson cell "$cell_id" '{robot_cell_id:$cell,program_code:"QA-SELF-533",version:1,trajectory:[{x_mm:0,y_mm:0,z_mm:700,time_ms:0},{x_mm:1200,y_mm:0,z_mm:700,time_ms:3000}],tool_radius_mm:100,payload_radius_mm:80,interlock_sequence:[{name:"gate_locked",sequence:1,depends_on:[]}]}' )"
 request "admin imports self-review program" 201 POST "/programs" "$admin_token" "$self_program"
@@ -109,6 +159,8 @@ self_run_id="$(jq -r '.data.id' <<<"$last_body")"
 request "admin reviews own uploaded program" 200 POST "/validations/$self_run_id/review" "$admin_token" '{"note":"Review step recorded before self-acceptance guard."}'
 request "uploader self-acceptance denied" 403 POST "/validations/$self_run_id/accept" "$admin_token" '{"note":"This acceptance must be denied by uploader isolation."}'
 require_json '.error.code == "forbidden"' "self acceptance error"
+request "uploader self-waiver denied" 403 POST "/validations/$self_run_id/waivers" "$admin_token" "$(jq -nc '{waivers:[{finding_kind:"envelope_violation",finding_index:0,reason:"Uploader must not waive own upload",expires_at:"2099-01-01T00:00:00Z"}]}')"
+require_json '.error.code == "forbidden"' "self waiver forbidden"
 
 request "auditor reads audit stream" 200 GET "/audit?page_size=150" "$auditor_token"
 require_json '([.data[].resource_type] | unique | length) == 4 and ([.data[].action] | index("validation_run.accepted")) != null' "all four entity projections and accepted action"

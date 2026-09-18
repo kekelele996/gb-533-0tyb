@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -180,28 +181,115 @@ func (service *ValidationRunService) Review(id uint, note string, actor dto.Acto
 	return validationResponse(after)
 }
 
-func (service *ValidationRunService) Accept(id uint, note string, actor dto.Actor, requestID string) (dto.ValidationRunResponse, error) {
-	before, err := service.repository.Get(id)
-	if err != nil {
-		return dto.ValidationRunResponse{}, MapRepositoryError("validation run", err)
-	}
-	if before.MotionProgram.UploadedBy == actor.ID {
-		return dto.ValidationRunResponse{}, Forbidden("program uploader cannot accept their own validation result")
-	}
-	if before.ValidationStatus != constants.ValidationReviewed {
-		return dto.ValidationRunResponse{}, Conflict("invalid_validation_transition", "only reviewed runs can be accepted", repository.ErrStateConflict)
-	}
-	if err := service.repository.Review(id, constants.ValidationReviewed, constants.ValidationAccepted, actor.ID, strings.TrimSpace(note)); err != nil {
-		return dto.ValidationRunResponse{}, Conflict("state_conflict", "validation state changed concurrently", err)
-	}
-	after, err := service.repository.Get(id)
-	if err != nil {
-		return dto.ValidationRunResponse{}, Internal("could not reload validation run", err)
-	}
-	if err := service.system.RecordAudit(actor, requestID, "validation_run.accepted", "validation_run", auditID(id), map[string]any{"note_length": len(note), "decision_boundary": "offline evidence only"}, validationSummary(before), validationSummary(after)); err != nil {
-		return dto.ValidationRunResponse{}, err
-	}
-	return validationResponse(after)
+// GrantWaivers appends reviewer justifications for individual envelope or
+// interlock violations. The entire batch and its audit event are committed
+// together; a single invalid, duplicate, expired or unauthorized waiver
+// rejects the request and leaves the run unchanged.
+func (service *ValidationRunService) GrantWaivers(id uint, requests []dto.GrantWaiverRequest, actor dto.Actor, requestID string) (dto.ValidationRunResponse, error) {
+	var response dto.ValidationRunResponse
+	err := service.db.Transaction(func(tx *gorm.DB) error {
+		repo := service.repository.WithDB(tx)
+		run, err := repo.GetForUpdate(id)
+		if err != nil {
+			return MapRepositoryError("validation run", err)
+		}
+		if run.MotionProgram.UploadedBy == actor.ID {
+			return Forbidden("the program uploader cannot grant violation waivers")
+		}
+		if run.ValidationStatus != constants.ValidationFailed && run.ValidationStatus != constants.ValidationReviewed {
+			return Conflict("invalid_validation_transition", "violation waivers can only be granted to failed or reviewed runs", repository.ErrStateConflict)
+		}
+		if run.ValidationStatus == constants.ValidationReviewed && violationCount(run) == 0 {
+			return Conflict("waiver_not_required", "a passed run has no violations to waive", repository.ErrStateConflict)
+		}
+		now := time.Now().UTC()
+		if err := validateWaiverBatch(run, requests, now); err != nil {
+			return err
+		}
+		granted := make([]model.ViolationWaiver, 0, len(requests))
+		for _, request := range requests {
+			waiver := model.ViolationWaiver{
+				ValidationRunID: run.ID, FindingKind: request.FindingKind, FindingIndex: request.FindingIndex,
+				Justification: strings.TrimSpace(request.Reason), ExpiresAt: request.ExpiresAt.UTC(),
+				GrantedBy: actor.ID, GrantedByName: actor.Username, GrantedAt: now,
+			}
+			if err := repo.CreateWaiver(&waiver); err != nil {
+				return Internal("could not persist violation waiver", err)
+			}
+			granted = append(granted, waiver)
+		}
+		if err := service.system.RecordAuditTx(tx, actor, requestID, "validation_run.waiver_granted", "validation_run", auditID(id),
+			map[string]any{"waiver_count": len(granted), "findings": waiverAuditFindings(granted)}, validationSummary(run), waiversAfterSummary(granted)); err != nil {
+			return err
+		}
+		reloaded, err := repo.Get(run.ID)
+		if err != nil {
+			return Internal("could not reload validation run", err)
+		}
+		response, err = validationResponse(reloaded)
+		return err
+	})
+	return response, err
+}
+
+func (service *ValidationRunService) Accept(id uint, note string, waiverRequests []dto.GrantWaiverRequest, actor dto.Actor, requestID string) (dto.ValidationRunResponse, error) {
+	var response dto.ValidationRunResponse
+	err := service.db.Transaction(func(tx *gorm.DB) error {
+		repo := service.repository.WithDB(tx)
+		before, err := repo.GetForUpdate(id)
+		if err != nil {
+			return MapRepositoryError("validation run", err)
+		}
+		if before.MotionProgram.UploadedBy == actor.ID {
+			return Forbidden("program uploader cannot accept their own validation result")
+		}
+		switch before.ValidationStatus {
+		case constants.ValidationReviewed:
+			// A previously reviewed run may still carry violations; waivers
+			// remain mandatory whenever it does.
+		case constants.ValidationFailed:
+			// Direct failed -> accepted is allowed only via the waiver path.
+		default:
+			return Conflict("invalid_validation_transition", "only failed or reviewed runs can be accepted", repository.ErrStateConflict)
+		}
+		now := time.Now().UTC()
+		if err := validateWaiverBatch(before, waiverRequests, now); err != nil {
+			return err
+		}
+		for _, request := range waiverRequests {
+			waiver := model.ViolationWaiver{
+				ValidationRunID: before.ID, FindingKind: request.FindingKind, FindingIndex: request.FindingIndex,
+				Justification: strings.TrimSpace(request.Reason), ExpiresAt: request.ExpiresAt.UTC(),
+				GrantedBy: actor.ID, GrantedByName: actor.Username, GrantedAt: now,
+			}
+			if err := repo.CreateWaiver(&waiver); err != nil {
+				return Internal("could not persist violation waiver", err)
+			}
+			before.Waivers = append(before.Waivers, waiver)
+		}
+		if required := violationKeys(before); len(required) > 0 {
+			if missing := missingActiveWaivers(before, required, now); len(missing) > 0 {
+				return Unprocessable("unwaived_violations", "every violation must carry an unexpired waiver before acceptance", nil)
+			}
+		}
+		if !constants.CanTransitionValidation(before.ValidationStatus, constants.ValidationAccepted) {
+			return Conflict("invalid_validation_transition", "this validation run cannot be accepted from its current state", repository.ErrStateConflict)
+		}
+		if err := repo.Accept(id, actor.ID, strings.TrimSpace(note)); err != nil {
+			return Conflict("state_conflict", "validation state changed concurrently", err)
+		}
+		after, err := repo.Get(id)
+		if err != nil {
+			return Internal("could not reload validation run", err)
+		}
+		if err := service.system.RecordAuditTx(tx, actor, requestID, "validation_run.accepted", "validation_run", auditID(id),
+			map[string]any{"note_length": len(note), "waivers_added": len(waiverRequests), "decision_boundary": "offline evidence only"}, validationSummary(before), validationSummary(after)); err != nil {
+			return err
+		}
+		response, err = validationResponse(after)
+		return err
+	})
+	return response, err
 }
 
 func (service *ValidationRunService) Void(id uint, note string, actor dto.Actor, requestID string) (dto.ValidationRunResponse, error) {
@@ -312,14 +400,139 @@ func validationResponse(run model.ValidationRun) (dto.ValidationRunResponse, err
 	}
 	return dto.ValidationRunResponse{
 		ID: run.ID, MotionProgramID: run.MotionProgramID, ProgramCode: run.MotionProgram.ProgramCode,
-		ProgramVersion: run.MotionProgram.Version, ZoneSnapshot: json.RawMessage(run.ZoneSnapshot),
+		ProgramVersion: run.MotionProgram.Version, ProgramUploadedBy: run.MotionProgram.UploadedBy,
+		ZoneSnapshot:    json.RawMessage(run.ZoneSnapshot),
 		ProgramSnapshot: json.RawMessage(run.ProgramSnapshot), AlgorithmVersion: run.AlgorithmVersion,
 		InputHash: run.InputHash, IdempotencyKey: run.IdempotencyKey, Attempt: run.Attempt, RetryOfID: run.RetryOfID,
-		CollisionEvents: collisions, InterlockFindings: findings, RiskScore: run.RiskScore,
+		CollisionEvents: collisions, InterlockFindings: findings, ViolationWaivers: waiverResponses(run.Waivers),
+		RiskScore:        run.RiskScore,
 		ValidationStatus: run.ValidationStatus, Explanation: run.Explanation, RequestedBy: run.RequestedBy,
 		StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, ReviewedBy: run.ReviewedBy,
 		ReviewedAt: run.ReviewedAt, ReviewNote: run.ReviewNote,
 	}, nil
+}
+
+// waiverKey identifies a single frozen finding within a run.
+func waiverKey(kind string, index int) string { return fmt.Sprintf("%s#%d", kind, index) }
+
+func violationKeys(run model.ValidationRun) map[string]struct{} {
+	keys := map[string]struct{}{}
+	var collisions []dto.CollisionEvent
+	if err := json.Unmarshal([]byte(run.CollisionEventsJSON), &collisions); err == nil {
+		for index, collision := range collisions {
+			if collision.Violation {
+				keys[waiverKey(dto.WaiverFindingEnvelope, index)] = struct{}{}
+			}
+		}
+	}
+	for index := 0; index < len(findingsSafe(run)); index++ {
+		keys[waiverKey(dto.WaiverFindingInterlock, index)] = struct{}{}
+	}
+	return keys
+}
+
+func findingsSafe(run model.ValidationRun) []dto.InterlockFinding {
+	var findings []dto.InterlockFinding
+	_ = json.Unmarshal([]byte(run.InterlockFindingsJSON), &findings)
+	return findings
+}
+
+func violationCount(run model.ValidationRun) int { return len(violationKeys(run)) }
+
+func activeWaiverKeys(waivers []model.ViolationWaiver, now time.Time) map[string]struct{} {
+	active := map[string]struct{}{}
+	for _, waiver := range waivers {
+		if waiver.ExpiresAt.After(now) {
+			active[waiverKey(waiver.FindingKind, waiver.FindingIndex)] = struct{}{}
+		}
+	}
+	return active
+}
+
+func missingActiveWaivers(run model.ValidationRun, required map[string]struct{}, now time.Time) []string {
+	active := activeWaiverKeys(run.Waivers, now)
+	missing := make([]string, 0)
+	for key := range required {
+		if _, covered := active[key]; !covered {
+			missing = append(missing, key)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// validateWaiverBatch enforces batch atomicity: every target must reference a
+// real violation of the frozen run, every deadline must still be in the future,
+// and neither the batch nor stored history may already hold an unexpired
+// waiver for the same finding.
+func validateWaiverBatch(run model.ValidationRun, requests []dto.GrantWaiverRequest, now time.Time) error {
+	var collisions []dto.CollisionEvent
+	if err := json.Unmarshal([]byte(run.CollisionEventsJSON), &collisions); err != nil {
+		return Internal("stored collision evidence is invalid", err)
+	}
+	var findings []dto.InterlockFinding
+	if err := json.Unmarshal([]byte(run.InterlockFindingsJSON), &findings); err != nil {
+		return Internal("stored interlock evidence is invalid", err)
+	}
+	existing := activeWaiverKeys(run.Waivers, now)
+	seen := map[string]struct{}{}
+	for _, request := range requests {
+		key := waiverKey(request.FindingKind, request.FindingIndex)
+		switch request.FindingKind {
+		case dto.WaiverFindingEnvelope:
+			if request.FindingIndex >= len(collisions) || !collisions[request.FindingIndex].Violation {
+				return Unprocessable("invalid_waiver_target", "waiver target is not an envelope violation of this run", nil)
+			}
+		case dto.WaiverFindingInterlock:
+			if request.FindingIndex >= len(findings) {
+				return Unprocessable("invalid_waiver_target", "waiver target is not an interlock finding of this run", nil)
+			}
+		default:
+			return Unprocessable("invalid_waiver_target", "waiver finding_kind is not supported", nil)
+		}
+		if !request.ExpiresAt.UTC().After(now) {
+			return Unprocessable("waiver_already_expired", "waiver expires_at must be a future time", nil)
+		}
+		if _, duplicated := seen[key]; duplicated {
+			return Conflict("duplicate_waiver", "the same finding is waived more than once in this request", nil)
+		}
+		seen[key] = struct{}{}
+		if _, alreadyActive := existing[key]; alreadyActive {
+			return Conflict("duplicate_waiver", "the finding already has an unexpired waiver", nil)
+		}
+	}
+	return nil
+}
+
+func waiverResponses(waivers []model.ViolationWaiver) []dto.ViolationWaiverResponse {
+	now := time.Now().UTC()
+	responses := make([]dto.ViolationWaiverResponse, 0, len(waivers))
+	for _, waiver := range waivers {
+		responses = append(responses, dto.ViolationWaiverResponse{
+			ID: waiver.ID, FindingKind: waiver.FindingKind, FindingIndex: waiver.FindingIndex,
+			Reason: waiver.Justification, ExpiresAt: waiver.ExpiresAt, GrantedBy: waiver.GrantedBy,
+			GrantedByName: waiver.GrantedByName, GrantedAt: waiver.GrantedAt, Active: waiver.ExpiresAt.After(now),
+		})
+	}
+	return responses
+}
+
+func waiverAuditFindings(waivers []model.ViolationWaiver) []map[string]any {
+	findings := make([]map[string]any, 0, len(waivers))
+	for _, waiver := range waivers {
+		findings = append(findings, map[string]any{
+			"finding_kind": waiver.FindingKind, "finding_index": waiver.FindingIndex, "expires_at": waiver.ExpiresAt,
+		})
+	}
+	return findings
+}
+
+func waiversAfterSummary(waivers []model.ViolationWaiver) map[string]any {
+	keys := make([]string, 0, len(waivers))
+	for _, waiver := range waivers {
+		keys = append(keys, waiverKey(waiver.FindingKind, waiver.FindingIndex))
+	}
+	return map[string]any{"granted_waivers": keys}
 }
 
 func validationSummary(run model.ValidationRun) map[string]any {

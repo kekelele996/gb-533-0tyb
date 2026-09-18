@@ -35,7 +35,7 @@ func TestValidationTransitions(t *testing.T) {
 		{ValidationPassed, ValidationReviewed, true},
 		{ValidationReviewed, ValidationAccepted, true},
 		{ValidationAccepted, ValidationVoided, true},
-		{ValidationFailed, ValidationAccepted, false},
+		{ValidationFailed, ValidationAccepted, true},
 		{ValidationVoided, ValidationReviewed, false},
 	}
 	for _, test := range tests {

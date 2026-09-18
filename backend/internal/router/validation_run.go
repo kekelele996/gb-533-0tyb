@@ -16,6 +16,7 @@ func registerValidationRunRoutes(group *gin.RouterGroup, target *handler.Validat
 	review := routes.Group("")
 	review.Use(middleware.RBAC(constants.RoleReviewer, constants.RoleAdmin))
 	review.POST("/:id/review", target.Review)
+	review.POST("/:id/waivers", target.GrantWaivers)
 	review.POST("/:id/accept", target.Accept)
 	review.POST("/:id/void", target.Void)
 }

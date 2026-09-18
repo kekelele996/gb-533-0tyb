@@ -42,7 +42,7 @@ docker compose ps
 | `/cells` | `RobotCell`、`SafetyZone` | 建档、编辑、冻结布局、停用 |
 | `/zones` | `SafetyZone`、`RobotCell` | 画布绘制、修订、启用、停用 |
 | `/programs` | `MotionProgram`、`RobotCell`、`SafetyZone` | 导入、解析、就绪、激活、替代 |
-| `/validation` | `ValidationRun`、`MotionProgram`、`SafetyZone` | 仿真、证据回放、评审、接受、作废 |
+| `/validation` | `ValidationRun`、`MotionProgram`、`SafetyZone`、`ViolationWaiver` | 仿真、证据回放、违规豁免、评审、接受、作废 |
 | `/audit` | 四实体审计投影 | 操作者、request ID、实体和动作筛选 |
 
 共享组件：
@@ -68,13 +68,19 @@ uploaded -> parsed -> ready -> active -> superseded
 
 ```text
 queued -> simulating -> passed | failed -> reviewed -> accepted
-                              \           \          \
-                               +-----------+-----------> voided
+                              \  (waiver complete)  ^          \
+                               +--------------------+-----------> voided
 ```
+
+带违规的 `failed` 运行在每条违规都持有未过期豁免时，可直接与豁免同事务进入 `accepted`；否则必须先 `reviewed` 且补齐豁免后才能接受。
 
 - 仿真接口要求 `Idempotency-Key`。
 - 相同输入哈希与算法版本默认复用既有结果。
 - `failed` 结果可显式重试，新记录保存 `attempt` 和 `retry_of_id`，不会覆盖旧尝试。
+- 评审员可为单条包络违规（`finding_kind=envelope_violation`）或联锁发现（`interlock_finding`）登记“违规豁免”，填写理由与截止时间；同一条发现只允许一个未过期豁免，重复、过期或指向非违规项的提交分别返回 409/422。
+- 接受带违规的运行前，每一条违规都必须有未过期豁免；豁免追加与接受在同一事务落盘，任一校验失败则整批回滚、运行保持失败。
+- 程序上传者既不能接受自己的校验结果，也不能为其登记豁免，即使其同时具有管理员角色。
+- 过期豁免不删除：刷新运行详情时历史豁免仍随证据回读，仅有一条新的未过期豁免会生效。
 - `accepted` 只表示离线证据被独立记录，不等于机器人可运行。
 
 ## 包络算法、假设与误差边界
@@ -187,8 +193,9 @@ queued -> simulating -> passed | failed -> reviewed -> accepted
 | GET | `/programs/:id` | 程序详情和 checksum |
 | POST | `/programs/:id/transition` | 程序状态迁移 |
 | GET/POST | `/validations` | 列表、幂等仿真 |
-| GET | `/validations/:id` | 冻结证据详情 |
+| GET | `/validations/:id` | 冻结证据详情（含全部豁免历史） |
 | POST | `/validations/:id/review`、`accept`、`void` | 人工处置 |
+| POST | `/validations/:id/waivers` | 为单条包络违规或联锁发现追加限时豁免 |
 | GET | `/audit` | 审计筛选 |
 
 健康端点为 `/healthz` 与 `/readyz`。统一错误码包括 `invalid_geometry`、`invalid_trajectory`、`invalid_program_transition`、`version_conflict`、`state_conflict`、`forbidden` 和 `unauthorized`。
@@ -258,6 +265,8 @@ curl -fsS http://127.0.0.1:18533/api/healthz
 - **422 invalid_geometry**：Polygon 必须闭合、无孔、不自交且面积至少 1 mm²。
 - **409 invalid_program_transition**：按 uploaded -> parsed -> ready -> active 顺序推进。
 - **仿真返回旧结果**：相同输入哈希和算法版本会复用；仅失败结果允许 `retry_failed=true` 创建新尝试。
+- **422 unwaived_violations**：接受带违规的失败运行前，必须为每条包络违规和联锁发现登记未过期豁免；豁免可随 `/accept` 请求一次性提交，失败时整批回滚。
+- **409 duplicate_waiver**：该发现已存在未过期豁免；过期后才能登记新豁免，旧记录保留在历史中。
 - **接受后仍显示风险**：预期行为。人工处置不会篡改碰撞、联锁或风险证据。
 - **管理员接受返回 403**：如果管理员本人上传了该程序，自审隔离仍然生效。
 

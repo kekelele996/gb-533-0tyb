@@ -1,7 +1,7 @@
 import { inject, Injectable, signal } from '@angular/core';
 import { finalize } from 'rxjs';
 import { ValidationRunApi } from '../api/validation-run';
-import { ValidationRun } from '../types/validation-run';
+import { GrantWaiverPayload, ValidationRun } from '../types/validation-run';
 import { apiErrorMessage } from '../utils/api-error';
 
 @Injectable({ providedIn: 'root' })
@@ -30,7 +30,8 @@ export class ValidationRunStore {
     this.mutate(this.api.create(programId, key, retryFailed));
   }
   review(run: ValidationRun, note: string): void { this.mutate(this.api.review(run.id, note)); }
-  accept(run: ValidationRun, note: string): void { this.mutate(this.api.accept(run.id, note)); }
+  grantWaivers(run: ValidationRun, waivers: GrantWaiverPayload[]): void { this.mutate(this.api.grantWaivers(run.id, waivers)); }
+  accept(run: ValidationRun, note: string, waivers: GrantWaiverPayload[] = []): void { this.mutate(this.api.accept(run.id, note, waivers)); }
   void(run: ValidationRun, note: string): void { this.mutate(this.api.void(run.id, note)); }
 
   private mutate(request: ReturnType<ValidationRunApi['create']>): void {

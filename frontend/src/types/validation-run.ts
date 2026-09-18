@@ -36,6 +36,27 @@ export interface ProgramSnapshot {
   program_state: string;
 }
 
+export type WaiverFindingKind = 'envelope_violation' | 'interlock_finding';
+
+export interface ViolationWaiver {
+  id: number;
+  finding_kind: WaiverFindingKind;
+  finding_index: number;
+  reason: string;
+  expires_at: string;
+  granted_by: number;
+  granted_by_name: string;
+  granted_at: string;
+  active: boolean;
+}
+
+export interface GrantWaiverPayload {
+  finding_kind: WaiverFindingKind;
+  finding_index: number;
+  reason: string;
+  expires_at: string;
+}
+
 export type ZoneSnapshot = Pick<SafetyZone, 'id' | 'name' | 'zone_type' | 'polygon_geojson' | 'min_height_mm' | 'max_height_mm' | 'speed_limit_mm_s' | 'access_rule' | 'version'>;
 
 export interface ValidationRun {
@@ -43,6 +64,7 @@ export interface ValidationRun {
   motion_program_id: number;
   program_code: string;
   program_version: number;
+  program_uploaded_by: number;
   zone_snapshot: ZoneSnapshot[];
   program_snapshot: ProgramSnapshot;
   algorithm_version: string;
@@ -52,6 +74,7 @@ export interface ValidationRun {
   retry_of_id?: number;
   collision_events: CollisionEvent[];
   interlock_findings: InterlockFinding[];
+  violation_waivers: ViolationWaiver[];
   risk_score: number;
   validation_status: ValidationStatus;
   explanation: string;

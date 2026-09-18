@@ -10,7 +10,8 @@ import { LucideAngularModule } from 'lucide-angular';
 import { MotionProgramStore } from '../stores/motion-program.store';
 import { useValidationRun } from '../hooks/use-validation-run';
 import { useAuth } from '../hooks/use-auth';
-import { ValidationRun } from '../types/validation-run';
+import { CollisionEvent, GrantWaiverPayload, ValidationRun } from '../types/validation-run';
+import { WaiverDraft } from '../components/common/finding-drawer.component';
 import { CellStateBadgeComponent } from '../components/common/cell-state-badge.component';
 import { SafetyCanvasComponent } from '../components/common/safety-canvas.component';
 import { FindingDrawerComponent } from '../components/common/finding-drawer.component';
@@ -39,11 +40,23 @@ import { FindingDrawerComponent } from '../components/common/finding-drawer.comp
           <div class="evidence-strip"><div><span>Risk score</span><strong>{{ run.risk_score | number:'1.0-0' }}<small>/100</small></strong></div><div><span>Envelope events</span><strong>{{ run.collision_events.length }}</strong></div><div><span>Interlock findings</span><strong>{{ run.interlock_findings.length }}</strong></div><div><span>Input hash</span><code>{{ run.input_hash | slice:0:12 }}…</code></div></div>
           <app-safety-canvas [zones]="run.zone_snapshot" [trajectory]="run.program_snapshot.trajectory ?? []" />
           <p class="explanation"><lucide-icon name="info" [size]="16" />{{ run.explanation }}</p>
-          <app-finding-drawer [collisions]="run.collision_events" [interlocks]="run.interlock_findings" />
+          @if (violationCount(run) > 0) {
+            <div class="waiver-summary" [class.complete]="coverage(run).covered === coverage(run).total">
+              <lucide-icon [name]="coverage(run).covered === coverage(run).total ? 'shield-check' : 'shield-alert'" [size]="16" />
+              <span>Waiver coverage <strong>{{ coverage(run).covered }}/{{ coverage(run).total }}</strong> violations · {{ run.violation_waivers.length }} waiver record(s) kept</span>
+              @if (coverage(run).covered < coverage(run).total) { <small>Every violation needs an unexpired waiver before this failed run can be accepted. Save individual waivers, or stage them and accept in one transaction.</small> }
+            </div>
+          }
+          <app-finding-drawer [collisions]="run.collision_events" [interlocks]="run.interlock_findings" [waivers]="run.violation_waivers" [canWaive]="canReview() && (run.validation_status === 'failed' || run.validation_status === 'reviewed')" (saveWaiver)="grantWaiver(run, $event)" (stageWaiver)="stageWaiver(run, $event)" />
+          @if (stagedCount(run) > 0) { <p class="staged-note"><lucide-icon name="file-pen-line" [size]="14" />{{ stagedCount(run) }} waiver draft(s) staged — they are written only when the run is accepted.</p> }
           <section class="review-block">
             <div><span>Human review</span>@if (run.review_note) { <p>{{ run.review_note }}</p> } @else { <p>No review note recorded.</p> }</div>
             @if (canReview() && (run.validation_status === 'passed' || run.validation_status === 'failed')) { <mat-form-field appearance="outline"><mat-label>Review note</mat-label><input matInput [(ngModel)]="reviewNote" /></mat-form-field><button mat-flat-button color="primary" type="button" (click)="review(run)" [disabled]="reviewNote.trim().length < 8"><lucide-icon name="user-check" [size]="16" />Record review</button> }
-            @if (canReview() && run.validation_status === 'reviewed') { <mat-form-field appearance="outline"><mat-label>Acceptance note</mat-label><input matInput [(ngModel)]="reviewNote" /></mat-form-field><button mat-flat-button color="primary" type="button" (click)="accept(run)" [disabled]="reviewNote.trim().length < 8"><lucide-icon name="circle-check" [size]="16" />Accept evidence</button><button mat-stroked-button type="button" (click)="voidRun(run)" [disabled]="reviewNote.trim().length < 8">Void</button> }
+            @if (canReview() && (run.validation_status === 'reviewed' || run.validation_status === 'failed')) {
+              <mat-form-field appearance="outline"><mat-label>Acceptance note</mat-label><input matInput [(ngModel)]="acceptNote" /></mat-form-field>
+              @if (violationCount(run) > 0) { <button mat-flat-button color="primary" type="button" class="waiver-accept" (click)="acceptWithWaivers(run)" [disabled]="acceptNote.trim().length < 8"><lucide-icon name="shield-check" [size]="16" />Accept with waivers</button> } @else { <button mat-flat-button color="primary" type="button" (click)="accept(run)" [disabled]="acceptNote.trim().length < 8"><lucide-icon name="circle-check" [size]="16" />Accept evidence</button> }
+              <button mat-stroked-button type="button" (click)="voidRun(run)" [disabled]="acceptNote.trim().length < 8">Void</button>
+            }
             @if (canSimulate() && run.validation_status === 'failed') { <button mat-stroked-button type="button" (click)="retry(run)"><lucide-icon name="rotate-ccw" [size]="15" />Retry failed input</button> }
           </section>
         } @else { <p class="empty">Select a run to inspect frozen evidence</p> }
@@ -51,7 +64,7 @@ import { FindingDrawerComponent } from '../components/common/finding-drawer.comp
     </section>
   `,
   styles: [`
-    .page-head .head-actions{align-items:center}.program-select{width:250px;margin-bottom:-20px}.decision-boundary{display:flex;gap:9px;margin-bottom:16px;padding:10px 12px;color:#7e2c27;background:#f9e9e6;border:1px solid #dfa59f;border-radius:3px}.decision-boundary div{display:grid;gap:2px}.decision-boundary strong{font-size:11px;text-transform:uppercase}.decision-boundary span{font-size:11px}.validation-grid{display:grid;grid-template-columns:minmax(330px,.6fr) minmax(560px,1.4fr);gap:16px;align-items:start}.run-register,.evidence-panel{background:#fafbf8;border:1px solid #bec8c4;border-radius:4px;overflow:hidden}.run-register>header{display:flex;justify-content:space-between;padding:11px 13px;background:#e6ebe8;border-bottom:1px solid #c6cfcc}.run-register header span{font-size:11px;font-weight:700;text-transform:uppercase}.run-register header small{font-size:10px}.run-row{width:100%;display:grid;grid-template-columns:35px minmax(0,1fr) 34px auto;align-items:center;gap:9px;padding:11px;background:#fafbf8;border:0;border-bottom:1px solid #dce2df;text-align:left;cursor:pointer}.run-row:hover,.run-row.selected{background:#f7efcf}.run-id{font-size:10px;font-weight:800}.run-row>span:nth-child(2){display:grid;gap:3px}.run-row strong{font-size:11px}.run-row small{color:#6a777a;font-size:9px}.risk{height:31px;display:grid;place-items:center;color:#f4f6f3;background:#39464a;border-radius:3px;font-size:11px;font-weight:800}.evidence-panel>header{display:flex;justify-content:space-between;gap:10px;padding:14px 15px;border-bottom:1px solid #c9d1ce}.evidence-panel header span{color:#6b777a;font-size:9px;text-transform:uppercase}.evidence-panel h2{margin:3px 0 0;font-size:17px}.evidence-strip{display:grid;grid-template-columns:repeat(4,1fr);background:#e8ece9;border-bottom:1px solid #cbd3d0}.evidence-strip>div{min-width:0;padding:10px 13px;border-right:1px solid #c5ceca}.evidence-strip>div:last-child{border-right:0}.evidence-strip span{display:block;color:#687578;font-size:9px;text-transform:uppercase}.evidence-strip strong{display:block;margin-top:3px;font-size:20px}.evidence-strip strong small{font-size:9px}.evidence-strip code{display:block;overflow:hidden;margin-top:6px;text-overflow:ellipsis;font-size:10px}.evidence-panel app-safety-canvas,.evidence-panel app-finding-drawer{display:block;margin:14px}.explanation{display:flex;align-items:flex-start;gap:8px;margin:0 14px 14px;padding:10px;background:#edf1ef;color:#4d5a5e;font-size:11px;line-height:1.5}.review-block{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px;padding-top:13px;border-top:1px solid #d7dedb}.review-block>div{display:grid;gap:3px;margin-right:auto}.review-block>div span{font-size:9px;text-transform:uppercase}.review-block p{margin:0;color:#5c696d;font-size:10px}.review-block mat-form-field{width:240px;margin-bottom:-20px}.review-block button{display:flex;gap:6px}
+    .page-head .head-actions{align-items:center}.program-select{width:250px;margin-bottom:-20px}.decision-boundary{display:flex;gap:9px;margin-bottom:16px;padding:10px 12px;color:#7e2c27;background:#f9e9e6;border:1px solid #dfa59f;border-radius:3px}.decision-boundary div{display:grid;gap:2px}.decision-boundary strong{font-size:11px;text-transform:uppercase}.decision-boundary span{font-size:11px}.validation-grid{display:grid;grid-template-columns:minmax(330px,.6fr) minmax(560px,1.4fr);gap:16px;align-items:start}.run-register,.evidence-panel{background:#fafbf8;border:1px solid #bec8c4;border-radius:4px;overflow:hidden}.run-register>header{display:flex;justify-content:space-between;padding:11px 13px;background:#e6ebe8;border-bottom:1px solid #c6cfcc}.run-register header span{font-size:11px;font-weight:700;text-transform:uppercase}.run-register header small{font-size:10px}.run-row{width:100%;display:grid;grid-template-columns:35px minmax(0,1fr) 34px auto;align-items:center;gap:9px;padding:11px;background:#fafbf8;border:0;border-bottom:1px solid #dce2df;text-align:left;cursor:pointer}.run-row:hover,.run-row.selected{background:#f7efcf}.run-id{font-size:10px;font-weight:800}.run-row>span:nth-child(2){display:grid;gap:3px}.run-row strong{font-size:11px}.run-row small{color:#6a777a;font-size:9px}.risk{height:31px;display:grid;place-items:center;color:#f4f6f3;background:#39464a;border-radius:3px;font-size:11px;font-weight:800}.evidence-panel>header{display:flex;justify-content:space-between;gap:10px;padding:14px 15px;border-bottom:1px solid #c9d1ce}.evidence-panel header span{color:#6b777a;font-size:9px;text-transform:uppercase}.evidence-panel h2{margin:3px 0 0;font-size:17px}.evidence-strip{display:grid;grid-template-columns:repeat(4,1fr);background:#e8ece9;border-bottom:1px solid #cbd3d0}.evidence-strip>div{min-width:0;padding:10px 13px;border-right:1px solid #c5ceca}.evidence-strip>div:last-child{border-right:0}.evidence-strip span{display:block;color:#687578;font-size:9px;text-transform:uppercase}.evidence-strip strong{display:block;margin-top:3px;font-size:20px}.evidence-strip strong small{font-size:9px}.evidence-strip code{display:block;overflow:hidden;margin-top:6px;text-overflow:ellipsis;font-size:10px}.evidence-panel app-safety-canvas,.evidence-panel app-finding-drawer{display:block;margin:14px}.explanation{display:flex;align-items:flex-start;gap:8px;margin:0 14px 14px;padding:10px;background:#edf1ef;color:#4d5a5e;font-size:11px;line-height:1.5}.waiver-summary{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin:0 14px 14px;padding:9px 11px;background:#f6f3e7;border:1px solid #d8cfa8;border-radius:3px;color:#5b5434;font-size:11px}.waiver-summary lucide-icon{margin-top:1px}.waiver-summary span{display:flex;gap:5px;align-items:center;flex-wrap:wrap}.waiver-summary small{flex-basis:100%;color:#83785a;font-size:10px}.waiver-summary.complete{background:#eef5ec;border-color:#a9c8ab;color:#2f5d3a}.staged-note{display:flex;align-items:center;gap:6px;margin:0 14px 12px;color:#8a6d1f;font-size:11px}.review-block{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px;padding-top:13px;border-top:1px solid #d7dedb}.review-block>div{display:grid;gap:3px;margin-right:auto}.review-block>div span{font-size:9px;text-transform:uppercase}.review-block p{margin:0;color:#5c696d;font-size:10px}.review-block mat-form-field{width:240px;margin-bottom:-20px}.review-block button{display:flex;gap:6px}.waiver-accept{background:#8a6d1f!important}
     @media(max-width:1120px){.validation-grid{grid-template-columns:1fr}.evidence-strip{grid-template-columns:repeat(2,1fr)}.evidence-strip>div:nth-child(2){border-right:0}}@media(max-width:720px){.page-head .head-actions{align-items:stretch}.program-select{width:100%;margin:0}.run-row{grid-template-columns:32px minmax(0,1fr) 32px}.run-row app-cell-state-badge{grid-column:2}.evidence-strip{grid-template-columns:1fr}.evidence-strip>div{border-right:0;border-bottom:1px solid #c5ceca}.review-block{align-items:stretch;flex-direction:column}.review-block mat-form-field{width:100%;margin:0}.review-block>div{margin-right:0}}
   `],
 })
@@ -62,6 +75,7 @@ export class ValidationPage implements OnInit {
   readonly eligiblePrograms = computed(() => this.programs.items().filter((program) => program.program_state === 'ready' || program.program_state === 'active'));
   programId: number | null = null;
   reviewNote = 'Independent offline evidence review completed.';
+  acceptNote = 'Violation waivers reviewed; accepted for planning only.';
   canSimulate = () => this.auth.can('safety_engineer', 'admin');
   canReview = () => this.auth.can('reviewer', 'admin');
   constructor() {
@@ -75,6 +89,46 @@ export class ValidationPage implements OnInit {
   run(): void { if (this.programId) this.runs.create(this.programId); }
   retry(run: ValidationRun): void { this.runs.create(run.motion_program_id, true); }
   review(run: ValidationRun): void { this.runs.review(run, this.reviewNote); }
-  accept(run: ValidationRun): void { this.runs.accept(run, this.reviewNote); }
-  voidRun(run: ValidationRun): void { this.runs.void(run, this.reviewNote); }
+  accept(run: ValidationRun): void { this.runs.accept(run, this.acceptNote); }
+  grantWaiver(run: ValidationRun, draft: WaiverDraft): void {
+    this.runs.grantWaivers(run, [this.toPayload(draft)]);
+  }
+  stageWaiver(run: ValidationRun, draft: WaiverDraft): void {
+    const list = this.pendingDrafts.get(run.id) ?? [];
+    // A later draft for the same finding replaces the earlier staged one;
+    // the server would reject duplicates within the atomic request anyway.
+    this.pendingDrafts.set(run.id, [...list.filter((item) => !(item.finding_kind === draft.kind && item.finding_index === draft.index)), this.toPayload(draft)]);
+  }
+  stagedCount(run: ValidationRun): number { return this.pendingDrafts.get(run.id)?.length ?? 0; }
+  acceptWithWaivers(run: ValidationRun): void {
+    // Staged drafts are appended in the same database transaction as the
+    // failed -> accepted transition; any failure rolls the whole request back
+    // and the run remains failed.
+    const drafts = this.pendingDrafts.get(run.id) ?? [];
+    this.runs.accept(run, this.acceptNote, drafts);
+    this.pendingDrafts.delete(run.id);
+  }
+  voidRun(run: ValidationRun): void { this.runs.void(run, this.acceptNote); }
+
+  violationCount(run: ValidationRun): number {
+    return run.collision_events.filter((event: CollisionEvent) => event.violation).length + run.interlock_findings.length;
+  }
+  coverage(run: ValidationRun): { covered: number; total: number } {
+    const total = this.violationCount(run);
+    const now = Date.now();
+    const active = new Set(run.violation_waivers.filter((waiver) => new Date(waiver.expires_at).getTime() > now).map((waiver) => `${waiver.finding_kind}:${waiver.finding_index}`));
+    let covered = 0;
+    run.collision_events.forEach((event, index) => { if (event.violation && active.has(`envelope_violation:${index}`)) covered++; });
+    run.interlock_findings.forEach((_, index) => { if (active.has(`interlock_finding:${index}`)) covered++; });
+    return { covered, total };
+  }
+
+  // Drafts staged from the drawer are only sent on accept-with-waivers, so a
+  // rejected acceptance never leaves partial waiver rows behind.
+  private pendingDrafts = new Map<number, GrantWaiverPayload[]>();
+  private toPayload(draft: WaiverDraft): GrantWaiverPayload {
+    // datetime-local carries no timezone; interpret the entry in the browser's
+    // local time and emit an RFC3339 instant so the server compares in UTC.
+    return { finding_kind: draft.kind, finding_index: draft.index, reason: draft.reason, expires_at: new Date(draft.deadline).toISOString() };
+  }
 }
